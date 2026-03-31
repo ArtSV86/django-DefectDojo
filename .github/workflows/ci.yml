@@ -1,0 +1,74 @@
+# Файл: .github/workflows/ci.yml
+name: CI / Безопасный пайплайн
+
+on: [push, pull_request]
+
+jobs:
+
+  # --- ЭТАП 1: Подготовка и SAST (Статический анализ) ---
+  sast_and_setup:
+    name: "SAST (CodeQL) и Установка зависимостей"
+    runs-on: ubuntu-latest
+    outputs:
+      codeql-status: ${{ steps.analyze.outputs.result }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # --- SAST: CodeQL ---
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: python
+
+      - name: Autobuild for CodeQL
+        uses: github/codeql-action/autobuild@v2
+
+      - name: Perform CodeQL Analysis
+        id: analyze
+        uses: github/codeql-action/analyze@v2
+
+      # --- Установка зависимостей (нужно для DAST) ---
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+  # --- ЭТАП 2: DAST (Динамический анализ) ---
+  # Этот джоб зависит от успешной установки зависимостей
+  dast_scan:
+    name: "DAST (ZAP)"
+    needs: sast_and_setup
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Docker (for ZAP)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl
+          curl -fsSL https://get.docker.com -o get-docker.sh
+          sudo sh get-docker.sh
+          sudo usermod -aG docker ${USER}
+          sudo service docker start
+
+      - name: Run ZAP Baseline Scan
+        env:
+          TARGET_URL: https://django-defectdojo-5qhb.onrender.com
+        run: |
+          echo "Запуск сканирования ZAP..."
+          zap-baseline.py -t ${TARGET_URL} -r scan-report.html -x scan-report.xml -f openapi
+
+      - name: Upload DAST Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: DAST-Report
+          path: scan-report.html
