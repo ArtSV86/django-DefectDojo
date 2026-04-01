@@ -49,7 +49,7 @@ jobs:
           TARGET_URL: https://django-defectdojo-5qhb.onrender.com
         run: |
           echo "Запуск сканирования ZAP..."
-          timeout 2m docker run --rm -v ${{ github.workspace }}:/zap/wrk/:rw owasp/zap2docker-stable zap-baseline.py \
+          timeout 2m docker run --rm -v ${{ github.workspace }}:/zap/wrk/:rw owasp/zap2docker-stable zap-baseline.sh \
             -t ${{ env.TARGET_URL }} \
             -r /zap/wrk/scan-report.html \
             -x /zap/wrk/scan-report.xml \
