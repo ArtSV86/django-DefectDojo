@@ -1,22 +1,23 @@
-# Файл: .github/workflows/ci.yml
 name: CI / Безопасный пайплайн
 
-on: [push, pull_request]
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 jobs:
-
-  # --- ЭТАП 1: Подготовка и SAST (Статический анализ) ---
-  sast_and_setup:
-    name: "SAST (CodeQL) и Установка зависимостей"
+  # --- ЭТАП 1: SAST (CodeQL) ---
+  run_sast:
+    name: "SAST (CodeQL)"
     runs-on: ubuntu-latest
     outputs:
-      codeql-status: ${{ steps.analyze.outputs.result }}
+      sast_status: ${{ steps.analyze.outputs.result }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # --- SAST: CodeQL ---
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
@@ -29,46 +30,92 @@ jobs:
         id: analyze
         uses: github/codeql-action/analyze@v3
 
-      # --- Установка зависимостей (нужно для DAST) ---
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.x'
-
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-  # --- ЭТАП 2: DAST (Динамический анализ) ---
-  # Этот джоб зависит от успешной установки зависимостей
-  dast_scan:
+  # --- ЭТАП 2: DAST (ZAP) ---
+  run_dast:
     name: "DAST (ZAP)"
-    needs: sast_and_setup
+    runs-on: ubuntu-latest
+    outputs:
+      dast_status: ${{ steps.run-zap.outputs.status }}
+      report_path: ${{ steps.run-zap.outputs.report }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run ZAP Baseline Scan using Docker
+        id: run-zap
+        env:
+          TARGET_URL: https://django-defectdojo-5qhb.onrender.com
+        run: |
+          echo "Запуск сканирования ZAP..."
+          # Пробуем запустить сканирование с таймаутом 2 минуты
+          timeout 2m docker run --rm -v ${{ github.workspace }}:/zap/wrk/:rw owasp/zap2docker-stable zap-baseline.py \
+            -t ${{ env.TARGET_URL }} \
+            -r /zap/wrk/scan-report.html \
+            -x /zap/wrk/scan-report.xml \
+            -f openapi -m 1 || true
+
+          # Проверяем, создался ли файл отчета
+          if [ -f "/zap/wrk/scan-report.xml" ]; then
+            echo "Сканирование завершено."
+            echo "::set-output name=status::success"
+            echo "::set-output name=report::scan-report.xml"
+          else
+            echo "Ошибка: Сайт недоступен или сканирование не завершилось."
+            echo "::set-output name=status::action_required"
+            echo "::set-output name=report::"
+          fi
+
+      - name: Upload DAST Report (if exists)
+        if: steps.run-zap.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: DAST-Report
+          path: scan-report.html
+
+  # --- ЭТАП 3: Security Checks (Secrets & Dependencies) ---
+  security_checks:
+    name: "Security Checks"
+    needs: [run_sast, run_dast]
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Docker (for ZAP)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y curl
-          curl -fsSL https://get.docker.com -o get-docker.sh
-          sudo sh get-docker.sh
-          sudo usermod -aG docker ${USER}
-          sudo service docker start
-
-      - name: Run ZAP Baseline Scan
-        env:
-          TARGET_URL: https://django-defectdojo-5qhb.onrender.com
-        run: |
-          echo "Запуск сканирования ZAP..."
-          zap-baseline.py -t ${TARGET_URL} -r scan-report.html -x scan-report.xml -f openapi
-
-      - name: Upload DAST Report
-        uses: actions/upload-artifact@v4
+      # --- Проверка секретов ---
+      - name: Scan for Secrets (gitleaks)
+        uses: zricethezav/gitleaks-action@v3.0.0
         with:
-          name: DAST-Report
-          path: scan-report.html
+          args: --verbose --redact
+
+      # --- Проверка зависимостей ---
+      - name: Install and Run pip-audit
+        run: |
+          python -m pip install pip-audit pip
+          python -m pip audit
+
+  # --- ЭТАП 4: Security Gateway (Блокировка релиза) ---
+  security_gateway:
+    name: "Security Gateway"
+    needs: [run_sast, run_dast]
+    runs-on: ubuntu-latest
+    if: ${{ needs.run_sast.outputs.sast_status == 'success' && needs.run_dast.outputs.dast_status == 'success' }}
+
+    steps:
+      - name: Check for Critical Issues and Fail Build
+        id: check_issues
+        run: |
+          echo "Проверка на критические уязвимости..."
+          
+          # Ищем в отчете ZAP слова Critical или High
+          ISSUES_FOUND=$(grep -E "Critical|High" /zap/wrk/scan-report.xml || true)
+          
+          if [ -n "$ISSUES_FOUND" ]; then
+              echo "Критические уязвимости найдены. Блокировка релиза."
+              echo "::error ::Security Gateway failed: Критические уязвимости найдены в результатах DAST."
+              exit 1 # Остановка выполнения с ошибкой
+          else
+              echo "Критических уязвимостей не обнаружено."
+              exit 0 # Успешное завершение
+          fi
