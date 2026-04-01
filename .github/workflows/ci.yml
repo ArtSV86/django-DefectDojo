@@ -2,7 +2,7 @@ name: CI / Безопасный пайплайн
 
 on:
   push:
-    branches: [ main ]
+    branches: [ ci-cd-security-pipeline ]
   pull_request:
     types: [opened, synchronize, reopened]
 
