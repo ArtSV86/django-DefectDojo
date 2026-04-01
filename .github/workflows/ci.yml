@@ -90,7 +90,7 @@ jobs:
           python scripts/fixture-updater.py dojo/fixtures/defect_dojo_sample_data.json
 
       - name: Scan for Secrets (gitleaks)
-        uses: zricethezav/gitleaks-action@v3.0.0
+        uses: zricethezav/gitleaks-action@latest
         with:
           args: --verbose --redact
 
